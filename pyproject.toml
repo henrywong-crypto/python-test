@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Production-grade TypeScript to Rust AST transpiler"
 readme = "README.md"
 license = {file = "LICENSE"}
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "tree-sitter>=0.23",
     "tree-sitter-typescript>=0.23",

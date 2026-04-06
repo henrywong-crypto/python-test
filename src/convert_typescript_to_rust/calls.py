@@ -3,9 +3,7 @@
 Handles ``Math.*``, ``console.*``, ``JSON.*``, ``Object.*``, ``Array.isArray``,
 ``Date.now``, ``axios.*``, common method renames, and top-level function calls.
 
-All public functions return Rust AST nodes (``RsExpr``).  The ``_math_call``
-and ``_console_call`` helpers still accept and return strings for backward
-compatibility with tests that call them directly.
+All public functions return Rust AST nodes (``RsExpr``).
 """
 
 from __future__ import annotations
@@ -131,8 +129,7 @@ def _call(node: Node) -> RsExpr:
     Returns:
         An ``RsExpr`` node.
     """
-    # Late import to break circular dependency
-    from .converter import c, _fmt
+    from .converter import convert_expr, _fmt_expr
     from .helpers import _snake
     from .expressions import _args
 
@@ -146,7 +143,8 @@ def _call(node: Node) -> RsExpr:
     if func.type == "member_expression":
         obj_node = func.child_by_field_name("object") or func.children[0]
         prop_node = func.child_by_field_name("property") or func.children[-1]
-        obj_s = _fmt(c(obj_node))
+        obj_expr = convert_expr(obj_node)
+        obj_s = _fmt_expr(obj_expr)
         prop = prop_node.text.decode() if prop_node else ""
         args_s = _args(args_node)
 
@@ -230,7 +228,8 @@ def _call(node: Node) -> RsExpr:
         return RsRawExpr(text=f"{obj_s}.{prop_s}({args_s})")
 
     # Top-level function calls
-    func_s = _fmt(c(func))
+    func_expr = convert_expr(func)
+    func_s = _fmt_expr(func_expr)
     args_s = _args(args_node)
 
     if func_s == "i64::from_str_radix":

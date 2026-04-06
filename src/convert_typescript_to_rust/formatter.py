@@ -113,6 +113,9 @@ def _format_function(fn: RsFunction, indent: int) -> str:
 
 def _format_param(p: RsParam) -> str:
     ts = format_type(p.type_ann)
+    if ts == "":
+        # Self param or comment-only param
+        return p.name
     if p.is_rest:
         return f"{p.name}: &[{ts}]"
     return f"{p.name}: {ts}"
@@ -132,10 +135,15 @@ def _format_struct(s: RsStruct, indent: int) -> str:
         parts.append(f"{P}pub struct {s.name};")
         return "\n".join(parts)
 
-    derives = ", ".join(s.derives)
-    parts.append(f"{P}#[derive({derives})]")
+    if s.derives:
+        derives = ", ".join(s.derives)
+        parts.append(f"{P}#[derive({derives})]")
     parts.append(f"{P}pub struct {s.name} {{")
     for fld in s.fields:
+        # Comment-only fields (from interface/type alias comments)
+        if fld.name.startswith("_comment_") and fld.doc_comment:
+            parts.append(f"{P}{_INDENT}{fld.doc_comment}")
+            continue
         if fld.doc_comment:
             parts.append(f"{P}{_INDENT}{fld.doc_comment}")
         ts = format_type(fld.type_ann)
@@ -156,6 +164,10 @@ def _format_enum(e: RsEnum, indent: int) -> str:
     parts.append(f"{P}pub enum {e.name} {{")
     if e.variants:
         for v in e.variants:
+            if v.doc_comment and v.name == v.doc_comment.strip():
+                # Comment-only variant (from enum body comments)
+                parts.append(f"{P}{_INDENT}{v.doc_comment}")
+                continue
             if v.doc_comment:
                 parts.append(f"{P}{_INDENT}{v.doc_comment}")
             parts.append(f"{P}{_INDENT}{v.name},")

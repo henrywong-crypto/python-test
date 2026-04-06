@@ -6,16 +6,17 @@ representation, and a formatter that renders the AST to source code.
 
 Architecture:
     TS source -> tree-sitter parse -> converter (builds Rust AST nodes)
-              -> formatter (renders to string) -> postprocess -> output
+              -> RsFile -> formatter (renders to string) -> postprocess -> output
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from .converter import c as _c, _fmt
+from .converter import convert_node, convert_item, c, _fmt_node
 from .postprocess import postprocess as _postprocess
-from .rust_ast import RsFile, RsComment, RsRawStmt
+from .rust_ast import RsFile, RsComment, RsRawStmt, RsItem
+from .formatter import format_file as _format_file
 
 __version__: str = "0.1.0"
 
@@ -48,8 +49,6 @@ def convert_file(content: str, file_path: str = "<string>") -> str:
     lang = TSX_LANGUAGE if file_path.endswith(".tsx") else TS_LANGUAGE
     parser = Parser(lang)
     tree = parser.parse(content.encode("utf-8"))
-    parts: list[str] = [f"//! Converted from {file_path}\n"]
-    prev_was_comment = False
     nodes = list(tree.root_node.children)
 
     # Pre-scan: mark comments that are immediately above import statements
@@ -66,17 +65,34 @@ def convert_file(content: str, file_path: str = "<string>") -> str:
                 else:
                     break
 
+    items: list[RsItem] = []
     for i, node in enumerate(nodes):
         if i in skip_indices:
             continue
-        code = _c(node, 0)
-        if code and code.strip():
-            is_comment = code.strip().startswith("//") or code.strip().startswith("/*")
-            if not prev_was_comment:
-                parts.append("")
-            parts.append(code)
-            prev_was_comment = is_comment
-    raw = "\n".join(parts)
+        result = convert_node(node)
+        if result is None:
+            continue
+        if isinstance(result, list):
+            for r in result:
+                if r is not None:
+                    if isinstance(r, RsItem):
+                        items.append(r)
+                    else:
+                        text = _fmt_node(r)
+                        if text and text.strip():
+                            items.append(RsRawStmt(text=text))
+        elif isinstance(result, RsItem):
+            items.append(result)
+        else:
+            text = _fmt_node(result)
+            if text and text.strip():
+                items.append(RsRawStmt(text=text))
+
+    rs_file = RsFile(
+        doc_comment=f"//! Converted from {file_path}",
+        items=items,
+    )
+    raw = _format_file(rs_file)
     raw = _postprocess(raw)
     return raw
 

@@ -1,7 +1,7 @@
 """Declaration handlers: functions, classes, interfaces, enums, exports, type aliases.
 
 Each public function takes a tree-sitter ``Node`` and returns a Rust AST
-node (``RsItem``) or a formatted string for backward compatibility.
+node (``RsItem``) or list of items. NO string building -- only AST construction.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from tree_sitter import Node
 from .rust_ast import (
     RsItem, RsFunction, RsStruct, RsEnum, RsImpl, RsTypeAlias, RsConst,
     RsField, RsEnumVariant, RsParam, RsComment, RsRawStmt,
-    RsStmt, RsRawExpr, RsExpr, RsType, RsRawType,
+    RsStmt, RsRawExpr, RsExpr, RsType, RsRawType, RsLiteral,
 )
 from .types import convert_type, convert_type_node, _TYPE_MAP
 from .helpers import _snake, _screaming, _safe_field
@@ -25,7 +25,6 @@ def _params_list(node: Node | None) -> list[RsParam]:
     params: list[RsParam] = []
     for ch in node.children:
         if ch.type == "comment":
-            # Comments in params are tricky -- we store as a param with comment name
             params.append(RsParam(
                 name=f"/* {ch.text.decode().lstrip('/ ')} */",
                 type_ann=RsRawType(text=""),
@@ -85,7 +84,6 @@ def _params(node: Node | None) -> str:
         from .formatter import format_type
         ts = format_type(p.type_ann)
         if ts == "":
-            # Comment-only param
             parts.append(p.name)
         elif p.is_rest:
             parts.append(f"{p.name}: &[{ts}]")
@@ -94,17 +92,7 @@ def _params(node: Node | None) -> str:
     return ", ".join(parts)
 
 
-def _function(node: Node, ind: int = 0) -> str:
-    """Convert a function or generator declaration to a Rust ``pub fn``.
-
-    Returns the formatted string (for backward compatibility with converter.py).
-    """
-    fn_node = _function_node(node)
-    from .formatter import format_item
-    return format_item(fn_node, ind)
-
-
-def _function_node(node: Node) -> RsFunction:
+def _function(node: Node) -> RsFunction:
     """Convert a function or generator declaration to an RsFunction AST node."""
     from .statements import _block_body_stmts
 
@@ -129,7 +117,7 @@ def _function_node(node: Node) -> RsFunction:
         rt = convert_type(ret)
         if rt not in ("()", ""):
             ret_type = RsRawType(text=rt)
-    body_stmts = _block_body_stmts(body) if body else [RsRawStmt(text="    // empty")]
+    body_stmts = _block_body_stmts(body) if body else [RsRawStmt(text="// empty")]
 
     return RsFunction(
         name=fn_name,
@@ -141,17 +129,17 @@ def _function_node(node: Node) -> RsFunction:
     )
 
 
-def _type_alias(node: Node) -> str:
+def _type_alias(node: Node) -> RsItem | list[RsItem]:
     """Convert a ``type_alias_declaration`` to a Rust type alias or struct."""
     name = None
     type_val = None
     found_eq = False
-    comments: list[str] = []
+    comments: list[RsComment] = []
     for ch in node.children:
         if ch.type == "type_identifier":
             name = ch
         if ch.type == "comment":
-            comments.append(ch.text.decode())
+            comments.append(RsComment(ch.text.decode()))
         if ch.text.decode() == "=":
             found_eq = True
         elif found_eq and ch.is_named and ch.type != "comment":
@@ -159,23 +147,28 @@ def _type_alias(node: Node) -> str:
             break
     n = name.text.decode() if name else "Unknown"
     if type_val and type_val.type == "object_type":
-        result = _object_type_to_struct(n, type_val)
+        struct = _object_type_to_struct(n, type_val)
         if comments:
-            return "\n".join(comments) + "\n" + result
-        return result
+            return comments + [struct]
+        return struct
     t = convert_type(type_val) if type_val else "serde_json::Value"
-    result = f"pub type {n} = {t};"
+    ta = RsTypeAlias(name=n, type_ann=RsRawType(text=t))
     if comments:
-        return "\n".join(comments) + "\n" + result
-    return result
+        return comments + [ta]
+    return ta
 
 
-def _object_type_to_struct(name: str, node: Node) -> str:
+def _object_type_to_struct(name: str, node: Node) -> RsStruct | RsTypeAlias:
     """Convert a TypeScript object type to a Rust struct with serde derives."""
-    fields: list[str] = []
+    fields: list[RsField] = []
     for ch in node.children:
         if ch.type == "comment":
-            fields.append(f"    {ch.text.decode()}")
+            fields.append(RsField(
+                name=f"_comment_{len(fields)}",
+                type_ann=RsRawType(text=""),
+                doc_comment=ch.text.decode(),
+                is_pub=False,
+            ))
         elif ch.type == "property_signature":
             pname = None
             ptype = None
@@ -192,16 +185,15 @@ def _object_type_to_struct(name: str, node: Node) -> str:
                 ft = convert_type(ptype) if ptype else "serde_json::Value"
                 if optional:
                     ft = f"Option<{ft}>"
-                fields.append(f"    pub {fn}: {ft},")
-    if fields:
-        return (
-            f"#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]\n"
-            f"pub struct {name} {{\n" + "\n".join(fields) + "\n}"
-        )
-    return f"pub type {name} = serde_json::Value;"
+                fields.append(RsField(name=fn, type_ann=RsRawType(text=ft)))
+    # Filter out comment-only fields for the emptiness check
+    real_fields = [f for f in fields if not f.name.startswith("_comment_")]
+    if real_fields:
+        return RsStruct(name=name, fields=fields)
+    return RsTypeAlias(name=name, type_ann=RsRawType(text="serde_json::Value"))
 
 
-def _interface(node: Node) -> str:
+def _interface(node: Node) -> RsStruct:
     """Convert an ``interface_declaration`` to a Rust struct."""
     name = None
     body = None
@@ -211,11 +203,16 @@ def _interface(node: Node) -> str:
         if ch.type in ("object_type", "interface_body"):
             body = ch
     n = name.text.decode() if name else "Unknown"
-    fields: list[str] = []
+    fields: list[RsField] = []
     if body:
         for ch in body.children:
             if ch.type == "comment":
-                fields.append(f"    {ch.text.decode()}")
+                fields.append(RsField(
+                    name=f"_comment_{len(fields)}",
+                    type_ann=RsRawType(text=""),
+                    doc_comment=ch.text.decode(),
+                    is_pub=False,
+                ))
             elif ch.type == "property_signature":
                 pname = None
                 ptype = None
@@ -232,16 +229,14 @@ def _interface(node: Node) -> str:
                     ft = convert_type(ptype) if ptype else "serde_json::Value"
                     if optional:
                         ft = f"Option<{ft}>"
-                    fields.append(f"    pub {fn}: {ft},")
-    if fields:
-        return (
-            f"#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]\n"
-            f"pub struct {n} {{\n" + "\n".join(fields) + "\n}"
-        )
-    return f"pub struct {n};"
+                    fields.append(RsField(name=fn, type_ann=RsRawType(text=ft)))
+    real_fields = [f for f in fields if not f.name.startswith("_comment_")]
+    if real_fields:
+        return RsStruct(name=n, fields=fields)
+    return RsStruct(name=n, is_empty=True)
 
 
-def _class(node: Node) -> str:
+def _class(node: Node) -> list[RsItem]:
     """Convert a class (or abstract class) declaration to a Rust struct + impl."""
     name = None
     body = None
@@ -251,13 +246,18 @@ def _class(node: Node) -> str:
         if ch.type == "class_body":
             body = ch
     n = name.text.decode() if name else "Unknown"
-    fields: list[str] = []
-    methods: list[str] = []
-    class_comments: list[str] = []
+    fields: list[RsField] = []
+    methods: list[RsFunction] = []
+    class_comments: list[RsField] = []
     if body:
         for ch in body.children:
             if ch.type == "comment":
-                class_comments.append(f"    {ch.text.decode()}")
+                class_comments.append(RsField(
+                    name=f"_comment_{len(class_comments)}",
+                    type_ann=RsRawType(text=""),
+                    doc_comment=ch.text.decode(),
+                    is_pub=False,
+                ))
             elif ch.type == "public_field_definition":
                 pname = None
                 ptype = None
@@ -269,21 +269,29 @@ def _class(node: Node) -> str:
                 if pname:
                     fn = _safe_field(_snake(pname.text.decode()))
                     ft = convert_type(ptype) if ptype else "serde_json::Value"
-                    fields.append(f"    pub {fn}: {ft},")
+                    fields.append(RsField(name=fn, type_ann=RsRawType(text=ft)))
             elif ch.type == "method_definition":
                 methods.append(_method(ch))
-    fs = "\n".join(fields) if fields else "    _ph: (),"
-    if class_comments:
-        fs = "\n".join(class_comments) + "\n" + fs
-    result = f"pub struct {n} {{\n{fs}\n}}"
+
+    all_fields = class_comments + fields
+    if not fields:
+        all_fields.append(RsField(name="_ph", type_ann=RsRawType(text="()")))
+
+    struct = RsStruct(
+        name=n,
+        fields=all_fields,
+        derives=[],  # no derives for class structs
+    )
+    items: list[RsItem] = [struct]
     if methods:
-        result += f"\n\nimpl {n} {{\n" + "\n\n".join(methods) + "\n}"
-    return result
+        items.append(RsImpl(type_name=n, methods=methods))
+    return items
 
 
-def _method(node: Node) -> str:
-    """Convert a ``method_definition`` to a Rust method inside an impl block."""
-    from .statements import _block_body
+def _method(node: Node) -> RsFunction:
+    """Convert a ``method_definition`` to an RsFunction for an impl block."""
+    from .statements import _block_body_stmts
+    from .converter import _fmt_node
 
     name = None
     params_node = None
@@ -304,28 +312,35 @@ def _method(node: Node) -> str:
     mn = _snake(name.text.decode()) if name else "unknown"
     if mn == "constructor":
         mn = "new"
-    ps = _params(params_node) if params_node else ""
-    if ps:
-        ps = f"&self, {ps}"
-    else:
-        ps = "&self"
-    ret_s = ""
+    params = _params_list(params_node)
+    # Add &self as first param
+    self_param = RsParam(name="&self", type_ann=RsRawType(text=""))
+    all_params = [self_param] + params
+    ret_type = None
     if ret:
         rt = convert_type(ret)
         if rt not in ("()", ""):
-            ret_s = f" -> {rt}"
-    async_kw = "async " if is_async else ""
-    body_s = _block_body(body, 2) if body else "        // empty"
-    body_lines = body_s.split("\n")
-    body_lines = [
-        line for line in body_lines
-        if not re.match(r"\s*super\(", line) and not re.match(r"\s*self\.name\s*=", line)
-    ]
-    body_s = "\n".join(body_lines)
-    return f"    pub {async_kw}fn {mn}({ps}){ret_s} {{\n{body_s}\n    }}"
+            ret_type = RsRawType(text=rt)
+    body_stmts = _block_body_stmts(body) if body else [RsRawStmt(text="// empty")]
+    # Filter out super() calls and self.name = ... assignments
+    filtered_stmts: list[RsStmt] = []
+    for s in body_stmts:
+        text = _fmt_node(s)
+        if re.match(r"\s*super\(", text) or re.match(r"\s*self\.name\s*=", text):
+            continue
+        filtered_stmts.append(s)
+
+    return RsFunction(
+        name=mn,
+        is_pub=True,
+        is_async=is_async,
+        params=all_params,
+        return_type=ret_type,
+        body=filtered_stmts,
+    )
 
 
-def _enum(node: Node) -> str:
+def _enum(node: Node) -> RsEnum:
     """Convert an ``enum_declaration`` to a Rust enum."""
     name = None
     body = None
@@ -335,27 +350,29 @@ def _enum(node: Node) -> str:
         if ch.type == "enum_body":
             body = ch
     n = name.text.decode() if name else "Unknown"
-    variants: list[str] = []
+    variants: list[RsEnumVariant] = []
     if body:
         for ch in body.children:
             if ch.type == "comment":
-                variants.append(f"    {ch.text.decode()}")
+                variants.append(RsEnumVariant(
+                    name=ch.text.decode().strip(),
+                    doc_comment=ch.text.decode(),
+                ))
             elif ch.type == "enum_member":
                 for c2 in ch.children:
                     if c2.type in ("property_identifier", "identifier"):
-                        variants.append(f"    {c2.text.decode()},")
+                        variants.append(RsEnumVariant(name=c2.text.decode()))
                         break
             elif ch.type in ("property_identifier", "identifier"):
-                variants.append(f"    {ch.text.decode()},")
-    vs = "\n".join(variants) if variants else "    // empty"
-    return f"#[derive(Debug, Clone, PartialEq)]\npub enum {n} {{\n{vs}\n}}"
+                variants.append(RsEnumVariant(name=ch.text.decode()))
+    return RsEnum(name=n, variants=variants)
 
 
-def _export(node: Node, ind: int) -> str:
-    """Convert an ``export_statement`` to Rust."""
-    from .converter import c, _fmt
+def _export(node: Node) -> RsItem | list[RsItem]:
+    """Convert an ``export_statement`` to Rust item(s)."""
+    from .converter import convert_node, convert_expr, _fmt_expr, _fmt_node
 
-    parts: list[str] = []
+    items: list[RsItem] = []
     has_default = any(
         ch.type == "default" or ch.text.decode() == "default"
         for ch in node.children
@@ -367,20 +384,32 @@ def _export(node: Node, ind: int) -> str:
             "interface_declaration", "class_declaration",
             "abstract_class_declaration", "enum_declaration",
         ):
-            parts.append(_fmt(c(ch, ind)))
+            result = convert_node(ch)
+            if isinstance(result, list):
+                items.extend(r for r in result if isinstance(r, RsItem))
+            elif isinstance(result, RsItem):
+                items.append(result)
+            elif result is not None:
+                items.append(RsRawStmt(_fmt_node(result)))
         elif ch.type == "lexical_declaration":
-            parts.append(_export_const(ch, ind))
+            ec = _export_const(ch)
+            if isinstance(ec, list):
+                items.extend(ec)
+            elif ec is not None:
+                items.append(ec)
         elif ch.type == "object" and has_default:
-            parts.append(f"pub const DEFAULT: serde_json::Value = {_fmt(c(ch))};")
+            items.append(RsRawStmt(f"pub const DEFAULT: serde_json::Value = {_fmt_expr(convert_expr(ch))};"))
         elif ch.type == "satisfies_expression" and has_default:
             named = [c2 for c2 in ch.children if c2.is_named]
             if named:
-                parts.append(f"pub const DEFAULT: serde_json::Value = {_fmt(c(named[0]))};")
+                items.append(RsRawStmt(f"pub const DEFAULT: serde_json::Value = {_fmt_expr(convert_expr(named[0]))};"))
         elif ch.type == "identifier" and has_default:
-            parts.append(f"pub use {_snake(ch.text.decode())} as default;")
+            items.append(RsRawStmt(f"pub use {_snake(ch.text.decode())} as default;"))
         elif ch.type == "call_expression" and has_default:
-            parts.append(f"pub const DEFAULT: serde_json::Value = {_fmt(c(ch))};")
-    return "\n".join(parts)
+            items.append(RsRawStmt(f"pub const DEFAULT: serde_json::Value = {_fmt_expr(convert_expr(ch))};"))
+    if len(items) == 1:
+        return items[0]
+    return items if items else RsRawStmt("")
 
 
 def _infer_const_type(value_node: Node | None) -> str:
@@ -417,11 +446,10 @@ def _infer_const_type(value_node: Node | None) -> str:
     return "&str"
 
 
-def _export_const(node: Node, ind: int) -> str:
+def _export_const(node: Node) -> RsItem | list[RsItem] | None:
     """Convert an exported ``const`` declaration."""
-    from .converter import c, _fmt
+    from .converter import convert_expr, _fmt_expr
 
-    P = "    " * ind
     for ch in node.children:
         if ch.type == "variable_declarator":
             name_node = None
@@ -443,20 +471,23 @@ def _export_const(node: Node, ind: int) -> str:
                     break
             name = name_node.text.decode() if name_node else "UNKNOWN"
             if value and value.type in ("arrow_function", "function"):
-                return _const_fn(name, value, ind)
-            val_s = _fmt(c(value)) if value else '""'
+                return _const_fn(name, value)
+            val_s = _fmt_expr(convert_expr(value)) if value else '""'
             const_name = _screaming(name)
             rs_type = convert_type(type_ann) if type_ann else _infer_const_type(value)
-            return f"{P}pub const {const_name}: {rs_type} = {val_s};"
-    return ""
+            return RsConst(
+                name=const_name,
+                type_ann=RsRawType(text=rs_type),
+                value=RsRawExpr(val_s),
+            )
+    return None
 
 
-def _const_fn(name: str, node: Node, ind: int) -> str:
+def _const_fn(name: str, node: Node) -> RsFunction:
     """Convert a ``const name = (params) => { ... }`` to ``pub fn name(...)``."""
-    from .converter import c, _fmt
-    from .statements import _block_body, _block_body_stmts
+    from .statements import _block_body_stmts
+    from .converter import convert_expr, _fmt_expr, _fmt_node
 
-    P = "    " * ind
     fn_name = _snake(name)
     is_async = any(ch.type == "async" for ch in node.children)
     params_node = None
@@ -469,15 +500,14 @@ def _const_fn(name: str, node: Node, ind: int) -> str:
             body = ch
         if ch.type == "type_annotation":
             ret = ch
-    ps = _params(params_node) if params_node else ""
-    ret_s = ""
+    params = _params_list(params_node)
+    ret_type = None
     if ret:
         rt = convert_type(ret)
         if rt not in ("()", ""):
-            ret_s = f" -> {rt}"
-    async_kw = "async " if is_async else ""
+            ret_type = RsRawType(text=rt)
     if body:
-        body_s = _block_body(body, ind + 1)
+        body_stmts = _block_body_stmts(body)
     else:
         expr = None
         found_arrow = False
@@ -487,5 +517,15 @@ def _const_fn(name: str, node: Node, ind: int) -> str:
             elif found_arrow and ch.is_named:
                 expr = ch
                 break
-        body_s = f"{P}    {_fmt(c(expr))}" if expr else f"{P}    // empty"
-    return f"{P}pub {async_kw}fn {fn_name}({ps}){ret_s} {{\n{body_s}\n{P}}}"
+        if expr:
+            body_stmts = [RsRawStmt(_fmt_expr(convert_expr(expr)))]
+        else:
+            body_stmts = [RsRawStmt("// empty")]
+    return RsFunction(
+        name=fn_name,
+        is_pub=True,
+        is_async=is_async,
+        params=params,
+        return_type=ret_type,
+        body=body_stmts,
+    )

@@ -1,7 +1,7 @@
 """Statement handlers: variable declarations, if, for, while, switch, try/catch.
 
 Each public function converts a tree-sitter statement node into a Rust AST
-node.  The ``_block_body_stmts`` helper returns a list of ``RsStmt`` nodes.
+node. NO string building or indentation -- only AST node construction.
 """
 
 from __future__ import annotations
@@ -21,18 +21,31 @@ def _block_body_stmts(node: Node | None) -> list[RsStmt]:
     """Convert children of a ``statement_block`` to a list of RsStmt nodes."""
     if node is None:
         return []
-    from .converter import c, _fmt
+    from .converter import convert_node, _fmt_node
 
     stmts: list[RsStmt] = []
     for ch in node.children:
         if ch.type in ("{", "}"):
             continue
-        result = c(ch)
+        result = convert_node(ch)
         if result is None:
             continue
-        text = _fmt(result)
-        if text is not None and text != "":
-            stmts.append(RsRawStmt(text=text))
+        if isinstance(result, list):
+            for r in result:
+                if isinstance(r, RsStmt):
+                    stmts.append(r)
+                elif r is not None:
+                    text = _fmt_node(r)
+                    if text:
+                        stmts.append(RsRawStmt(text=text))
+        elif isinstance(result, RsStmt):
+            stmts.append(result)
+        elif isinstance(result, RsExpr):
+            stmts.append(RsExprStmt(result))
+        else:
+            text = _fmt_node(result)
+            if text:
+                stmts.append(RsRawStmt(text=text))
     return stmts
 
 
@@ -41,16 +54,18 @@ def _block_body(node: Node | None, ind: int) -> str:
 
     Backward-compatible wrapper that returns a formatted string.
     """
+    from .converter import _fmt_node
+    from .formatter import format_stmt
     stmts = _block_body_stmts(node)
     lines = []
     for s in stmts:
-        text = s.text if isinstance(s, RsRawStmt) else ""
+        text = format_stmt(s, ind)
         if text:
             lines.append(text)
     return "\n".join(lines)
 
 
-def _var_decl(node: Node, ind: int) -> str:
+def _var_decl(node: Node) -> RsStmt | list[RsStmt]:
     """Convert a ``lexical_declaration`` or ``variable_declaration`` to Rust ``let`` bindings."""
     kind = "let"
     for ch in node.children:
@@ -58,23 +73,36 @@ def _var_decl(node: Node, ind: int) -> str:
             kind = "let"
         elif ch.type in ("let", "var"):
             kind = "let mut"
-    results: list[str] = []
+    results: list[RsStmt] = []
     for ch in node.children:
         if ch.type == "variable_declarator":
-            results.append(_var_declarator_line(ch, ind, kind))
+            r = _var_declarator(ch, kind)
+            if isinstance(r, list):
+                results.extend(r)
+            elif r is not None:
+                results.append(r)
         elif ch.type == "comment":
-            results.append(f"{'    ' * ind}{ch.text.decode()}")
+            results.append(RsComment(ch.text.decode()))
     tc = _trailing_comments(node)
     if tc and results:
-        results[-1] = f"{results[-1]} {tc}"
-    return "\n".join(results)
+        # Append trailing comment to the last statement
+        last = results[-1]
+        if isinstance(last, RsRawStmt):
+            results[-1] = RsRawStmt(f"{last.text} {tc}")
+        else:
+            from .converter import _fmt_node
+            from .formatter import format_stmt
+            text = format_stmt(last, 0)
+            results[-1] = RsRawStmt(f"{text} {tc}")
+    if len(results) == 1:
+        return results[0]
+    return results
 
 
-def _var_declarator_line(node: Node, ind: int, kind: str = "let") -> str:
-    """Convert a single ``variable_declarator`` to a Rust ``let`` binding."""
-    from .converter import c, _fmt
+def _var_declarator(node: Node, kind: str = "let") -> RsStmt | list[RsStmt] | None:
+    """Convert a single ``variable_declarator`` to Rust AST node(s)."""
+    from .converter import convert_expr, _fmt_expr
 
-    P = "    " * ind
     name_node = None
     value = None
     type_ann = None
@@ -99,7 +127,8 @@ def _var_declarator_line(node: Node, ind: int, kind: str = "let") -> str:
             break
 
     if pattern is not None:
-        val_s = _fmt(c(value)) if value else "Default::default()"
+        val_expr = convert_expr(value) if value else RsRawExpr("Default::default()")
+        val_s = _fmt_expr(val_expr)
         if pattern.type == "object_pattern":
             fields: list[str] = []
             for ch in pattern.children:
@@ -112,62 +141,81 @@ def _var_declarator_line(node: Node, ind: int, kind: str = "let") -> str:
                             local = c2
                     if local:
                         fields.append(_snake(local.text.decode()))
-            lines = [f"{P}let _destructured = {val_s};"]
+            stmts: list[RsStmt] = [RsLet("_destructured", mutable=False, value=RsRawExpr(val_s))]
             for f in fields:
-                lines.append(
-                    f'{P}let {f} = _destructured.get("{f}").cloned().unwrap_or_default();'
-                )
-            return "\n".join(lines)
+                stmts.append(RsRawStmt(
+                    f'let {f} = _destructured.get("{f}").cloned().unwrap_or_default();'
+                ))
+            return stmts
         elif pattern.type == "array_pattern":
             fields_arr: list[str] = []
             for ch in pattern.children:
                 if ch.type == "identifier":
                     fields_arr.append(_snake(ch.text.decode()))
-            lines = [f"{P}let _arr = {val_s};"]
+            stmts_arr: list[RsStmt] = [RsLet("_arr", mutable=False, value=RsRawExpr(val_s))]
             for i, f in enumerate(fields_arr):
-                lines.append(f"{P}let {f} = _arr.get({i}).cloned().unwrap_or_default();")
-            return "\n".join(lines)
+                stmts_arr.append(RsRawStmt(
+                    f"let {f} = _arr.get({i}).cloned().unwrap_or_default();"
+                ))
+            return stmts_arr
 
     name = _snake(name_node.text.decode()) if name_node else "_"
-    ts = f": {convert_type(type_ann)}" if type_ann else ""
+    mutable = "mut" in kind
+    from .rust_ast import RsRawType
+    ts = RsRawType(text=convert_type(type_ann)) if type_ann else None
     if value:
-        return f"{P}{kind} {name}{ts} = {_fmt(c(value))};"
-    return f"{P}{kind} {name}{ts} = Default::default();"
+        val_expr = convert_expr(value)
+        return RsLet(name, mutable=mutable, type_ann=ts, value=val_expr)
+    return RsLet(name, mutable=mutable, type_ann=ts, value=None)
 
 
-def _if_stmt(node: Node, ind: int) -> str:
-    """Convert an ``if_statement`` to Rust ``if ... { } else { }``."""
-    from .converter import c, _fmt
+# Keep the old name as an alias for backward compat in tests
+_var_declarator_line = None  # removed -- use _var_declarator
 
-    P = "    " * ind
+
+def _if_stmt(node: Node) -> RsIf:
+    """Convert an ``if_statement`` to an RsIf AST node."""
+    from .converter import convert_expr, convert_node, _fmt_expr
+
     cond = node.child_by_field_name("condition")
     cons = node.child_by_field_name("consequence")
     alt = node.child_by_field_name("alternative")
-    cond_s = _strip_parens(_fmt(c(cond))) if cond else "true"
-    result = f"{P}if {cond_s} {{\n{_block_body(cons, ind + 1)}\n{P}}}"
+    cond_s = _strip_parens(_fmt_expr(convert_expr(cond))) if cond else "true"
+    then_body = _block_body_stmts(cons)
+    else_body = None
     if alt:
-        result += _fmt(c(alt))
-    return result
+        alt_result = convert_node(alt)
+        if isinstance(alt_result, RsIf):
+            else_body = [alt_result]
+        elif isinstance(alt_result, list):
+            else_body = alt_result
+        elif alt_result is not None:
+            else_body = [alt_result] if isinstance(alt_result, RsStmt) else None
+    return RsIf(
+        condition=RsRawExpr(cond_s),
+        then_body=then_body,
+        else_body=else_body,
+    )
 
 
-def _for_c(node: Node, ind: int) -> str:
+def _for_c(node: Node) -> RsLoop:
     """Convert a C-style ``for`` statement to a Rust ``loop``."""
-    P = "    " * ind
-    body = None
+    body_node = None
     for ch in node.children:
         if ch.type == "statement_block":
-            body = ch
-    return f"{P}loop {{\n{_block_body(body, ind + 1)}\n{P}    break; // C-style for\n{P}}}"
+            body_node = ch
+    body_stmts = _block_body_stmts(body_node)
+    body_stmts.append(RsRawStmt("break; // C-style for"))
+    return RsLoop(body=body_stmts)
 
 
-def _for_in(node: Node, ind: int) -> str:
+def _for_in(node: Node) -> RsFor:
     """Convert a ``for-in`` or ``for-of`` statement to Rust ``for ... in ... {}``."""
-    from .converter import c, _fmt
+    from .converter import convert_expr, _fmt_expr
 
-    P = "    " * ind
     left = node.child_by_field_name("left")
     right = node.child_by_field_name("right")
-    body = node.child_by_field_name("body")
+    body_node = node.child_by_field_name("body")
     var_name = "_item"
     if left:
         for ch in left.children:
@@ -179,15 +227,18 @@ def _for_in(node: Node, ind: int) -> str:
                     if c2.type == "identifier":
                         var_name = _snake(c2.text.decode())
                         break
-    iter_s = _fmt(c(right)) if right else "iter"
-    return f"{P}for {var_name} in {iter_s}.iter() {{\n{_block_body(body, ind + 1)}\n{P}}}"
+    iter_s = _fmt_expr(convert_expr(right)) if right else "iter"
+    return RsFor(
+        var_name=var_name,
+        iter_expr=RsRawExpr(f"{iter_s}.iter()"),
+        body=_block_body_stmts(body_node),
+    )
 
 
-def _switch(node: Node, ind: int) -> str:
+def _switch(node: Node) -> RsMatch:
     """Convert a ``switch`` statement to Rust ``match``."""
-    from .converter import c, _fmt
+    from .converter import convert_expr, _fmt_expr
 
-    P = "    " * ind
     val = None
     body = None
     for ch in node.children:
@@ -195,12 +246,15 @@ def _switch(node: Node, ind: int) -> str:
             val = ch
         if ch.type == "switch_body":
             body = ch
-    val_s = _strip_parens(_fmt(c(val))) if val else "value"
-    arms: list[str] = []
+    val_s = _strip_parens(_fmt_expr(convert_expr(val))) if val else "value"
+    arms: list[RsMatchArm] = []
     if body:
         for ch in body.children:
             if ch.type == "comment":
-                arms.append(f"{'    ' * (ind + 1)}{ch.text.decode()}")
+                arms.append(RsMatchArm(
+                    pattern=RsComment(ch.text.decode()),
+                    body=[],
+                ))
             elif ch.type == "switch_case":
                 case_val = None
                 stmts: list[Node] = []
@@ -211,21 +265,55 @@ def _switch(node: Node, ind: int) -> str:
                         case_val = c2
                     elif c2.is_named:
                         stmts.append(c2)
-                cv = _fmt(c(case_val)) if case_val else "_"
-                bl = [_fmt(c(s)) for s in stmts if "break;" not in _fmt(c(s))]
-                bl_s = "\n".join(bl) if bl else f"{'    ' * (ind + 2)}()"
-                arms.append(f"{'    ' * (ind + 1)}{cv} => {{\n{bl_s}\n{'    ' * (ind + 1)}}}")
+                cv_expr = convert_expr(case_val) if case_val else RsRawExpr("_")
+                # Convert body stmts, filtering out break
+                from .converter import convert_node, _fmt_node
+                body_stmts: list[RsStmt] = []
+                for s in stmts:
+                    r = convert_node(s)
+                    if r is None:
+                        continue
+                    text = _fmt_node(r)
+                    if "break;" in text:
+                        continue
+                    if isinstance(r, list):
+                        for item in r:
+                            if isinstance(item, RsStmt):
+                                body_stmts.append(item)
+                            elif item is not None:
+                                body_stmts.append(RsRawStmt(text=_fmt_node(item)))
+                    elif isinstance(r, RsStmt):
+                        body_stmts.append(r)
+                    else:
+                        body_stmts.append(RsRawStmt(text=text))
+                arms.append(RsMatchArm(pattern=cv_expr, body=body_stmts))
             elif ch.type == "switch_default":
                 stmts_d = [c2 for c2 in ch.children if c2.is_named]
-                bl = [_fmt(c(s)) for s in stmts_d if "break;" not in _fmt(c(s))]
-                bl_s = "\n".join(bl) if bl else f"{'    ' * (ind + 2)}()"
-                arms.append(f"{'    ' * (ind + 1)}_ => {{\n{bl_s}\n{'    ' * (ind + 1)}}}")
-    return f"{P}match {val_s} {{\n" + "\n".join(arms) + f"\n{P}}}"
+                from .converter import convert_node, _fmt_node
+                body_stmts_d: list[RsStmt] = []
+                for s in stmts_d:
+                    r = convert_node(s)
+                    if r is None:
+                        continue
+                    text = _fmt_node(r)
+                    if "break;" in text:
+                        continue
+                    if isinstance(r, list):
+                        for item in r:
+                            if isinstance(item, RsStmt):
+                                body_stmts_d.append(item)
+                            elif item is not None:
+                                body_stmts_d.append(RsRawStmt(text=_fmt_node(item)))
+                    elif isinstance(r, RsStmt):
+                        body_stmts_d.append(r)
+                    else:
+                        body_stmts_d.append(RsRawStmt(text=text))
+                arms.append(RsMatchArm(pattern=RsRawExpr("_"), body=body_stmts_d))
+    return RsMatch(expr=RsRawExpr(val_s), arms=arms)
 
 
-def _try(node: Node, ind: int) -> str:
-    """Convert a ``try/catch/finally`` statement to Rust."""
-    P = "    " * ind
+def _try(node: Node) -> RsTryCatch:
+    """Convert a ``try/catch/finally`` statement to Rust AST."""
     try_block = None
     catch_clause = None
     finally_clause = None
@@ -236,31 +324,30 @@ def _try(node: Node, ind: int) -> str:
             catch_clause = ch
         if ch.type == "finally_clause":
             finally_clause = ch
-    try_s = _block_body(try_block, ind + 1) if try_block else ""
-    result = ""
+    try_body = _block_body_stmts(try_block) if try_block else []
+    catch_var = "e"
+    catch_body: list[RsStmt] = []
     if catch_clause:
         param = None
-        catch_body = None
+        catch_block = None
         for ch in catch_clause.children:
             if ch.type == "identifier":
                 param = ch
             if ch.type == "statement_block":
-                catch_body = ch
-        pn = _snake(param.text.decode()) if param else "e"
-        catch_s = _block_body(catch_body, ind + 2) if catch_body else ""
-        result = (
-            f"{P}match (|| -> Result<(), Box<dyn std::error::Error>> {{\n"
-            f"{try_s}\n{P}    Ok(())\n{P}}})() {{\n"
-            f"{P}    Ok(()) => {{}}\n"
-            f"{P}    Err({pn}) => {{\n{catch_s}\n{P}    }}\n{P}}}"
-        )
-    else:
-        result = f"{P}// try\n{try_s}"
+                catch_block = ch
+        catch_var = _snake(param.text.decode()) if param else "e"
+        catch_body = _block_body_stmts(catch_block) if catch_block else []
+    finally_body: list[RsStmt] | None = None
     if finally_clause:
         fb = None
         for ch in finally_clause.children:
             if ch.type == "statement_block":
                 fb = ch
         if fb:
-            result += f"\n{P}// finally\n{_block_body(fb, ind)}"
-    return result
+            finally_body = _block_body_stmts(fb)
+    return RsTryCatch(
+        try_body=try_body,
+        catch_var=catch_var,
+        catch_body=catch_body,
+        finally_body=finally_body,
+    )

@@ -1,6 +1,7 @@
 """Expression handlers: template strings, arrows, objects, inline functions.
 
-Converts tree-sitter expression nodes to Rust AST nodes or helper strings.
+Converts tree-sitter expression nodes to Rust AST nodes.
+NO string building -- only AST node construction.
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from tree_sitter import Node
 
 from .rust_ast import (
     RsExpr, RsRawExpr, RsStmt, RsRawStmt,
-    RsFunction, RsParam, RsItem,
+    RsFunction, RsParam, RsItem, RsClosure,
 )
 from .types import convert_type, convert_type_node
 from .helpers import _snake
@@ -19,22 +20,22 @@ from .declarations import _params_list
 def _args(node: Node | None) -> str:
     """Convert an ``arguments`` node to a comma-separated Rust argument string.
 
-    Returns a plain string for backward compatibility with call handlers.
+    Returns a plain string because arguments are used inline in many places.
     """
     if node is None:
         return ""
-    from .converter import c, _fmt
+    from .converter import convert_expr, _fmt_expr
 
     parts: list[str] = []
     for ch in node.children:
         if ch.is_named:
-            parts.append(_fmt(c(ch)))
+            parts.append(_fmt_expr(convert_expr(ch)))
     return ", ".join(parts)
 
 
 def _template(node: Node) -> RsExpr:
     """Convert a template string to Rust ``format!()`` or a plain string."""
-    from .converter import c, _fmt
+    from .converter import convert_expr, _fmt_expr
 
     parts: list[str] = []
     fmt_args: list[str] = []
@@ -45,7 +46,7 @@ def _template(node: Node) -> RsExpr:
             named = [c2 for c2 in ch.children if c2.is_named]
             if named:
                 parts.append("{}")
-                fmt_args.append(_fmt(c(named[0])))
+                fmt_args.append(_fmt_expr(convert_expr(named[0])))
     if not fmt_args:
         return RsRawExpr(text=f'"{"".join(parts)}".to_string()')
     return RsRawExpr(text=f'format!("{"".join(parts)}", {", ".join(fmt_args)})')
@@ -53,7 +54,7 @@ def _template(node: Node) -> RsExpr:
 
 def _arrow(node: Node) -> RsExpr:
     """Convert an arrow function to a Rust closure."""
-    from .converter import c, _fmt
+    from .converter import convert_expr, _fmt_expr
     from .statements import _block_body_stmts
 
     params_node = None
@@ -80,9 +81,11 @@ def _arrow(node: Node) -> RsExpr:
         ps = ", ".join(ps_list)
     else:
         ps = ""
+
     if body:
         stmts = _block_body_stmts(body)
-        body_s = "\n".join(_fmt(s) for s in stmts if _fmt(s))
+        from .converter import _fmt_node
+        body_s = "\n".join(_fmt_node(s) for s in stmts if _fmt_node(s))
         return RsRawExpr(text=f"|{ps}| {{\n{body_s}\n}}")
     expr = None
     found = False
@@ -93,7 +96,7 @@ def _arrow(node: Node) -> RsExpr:
             expr = ch
             break
     if expr:
-        return RsRawExpr(text=f"|{ps}| {_fmt(c(expr))}")
+        return RsRawExpr(text=f"|{ps}| {_fmt_expr(convert_expr(expr))}")
     return RsRawExpr(text=f"|{ps}| {{}}")
 
 
@@ -102,7 +105,7 @@ def _object(node: Node) -> RsExpr:
 
     Inline function values are extracted as separate ``pub fn`` definitions.
     """
-    from .converter import c, _fmt
+    from .converter import convert_expr, convert_node, _fmt_expr, _fmt_node
     from .statements import _block_body_stmts
 
     pairs: list[str] = []
@@ -122,14 +125,14 @@ def _object(node: Node) -> RsExpr:
                     extra_fns.append(fn_code)
                     pairs.append(f'"{key}": {fn_name}')
                 else:
-                    pairs.append(_fmt(c(ch)))
+                    pairs.append(_fmt_expr(convert_expr(ch)))
             else:
-                pairs.append(_fmt(c(ch)))
+                pairs.append(_fmt_expr(convert_expr(ch)))
         elif ch.type == "shorthand_property_identifier":
             name = ch.text.decode()
             pairs.append(f'"{name}": {_snake(name)}')
         elif ch.type == "spread_element":
-            pairs.append(_fmt(c(ch)))
+            pairs.append(_fmt_expr(convert_expr(ch)))
         elif ch.type == "method_definition":
             name_node = None
             body_node = None
@@ -149,7 +152,7 @@ def _object(node: Node) -> RsExpr:
                 ps = _params_str(params_node) if params_node else ""
                 async_kw = "async " if is_async else ""
                 stmts = _block_body_stmts(body_node) if body_node else []
-                body_s = "\n".join(_fmt(s) for s in stmts if _fmt(s))
+                body_s = "\n".join(_fmt_node(s) for s in stmts if _fmt_node(s))
                 extra_fns.append(
                     f"pub {async_kw}fn {fn_name}({ps}) {{\n{body_s}\n}}"
                 )
@@ -166,7 +169,7 @@ def _object(node: Node) -> RsExpr:
 
 def _extract_inline_fn(name: str, node: Node) -> str:
     """Extract an inline arrow/function expression as a named Rust function."""
-    from .converter import c, _fmt
+    from .converter import convert_expr, _fmt_expr, _fmt_node
     from .statements import _block_body_stmts
 
     is_async = any(ch.type == "async" for ch in node.children)
@@ -189,7 +192,7 @@ def _extract_inline_fn(name: str, node: Node) -> str:
     async_kw = "async " if is_async else ""
     if body:
         stmts = _block_body_stmts(body)
-        body_s = "\n".join(_fmt(s) for s in stmts if _fmt(s))
+        body_s = "\n".join(_fmt_node(s) for s in stmts if _fmt_node(s))
     else:
         expr = None
         found = False
@@ -199,7 +202,7 @@ def _extract_inline_fn(name: str, node: Node) -> str:
             elif found and ch.is_named:
                 expr = ch
                 break
-        body_s = f"    {_fmt(c(expr))}" if expr else "    // empty"
+        body_s = f"    {_fmt_expr(convert_expr(expr))}" if expr else "    // empty"
     return f"pub {async_kw}fn {name}({ps}){ret_s} {{\n{body_s}\n}}"
 
 
