@@ -120,10 +120,24 @@ def _object(node: Node) -> RsExpr:
                 key = named[0].text.decode().strip("'\"")
                 val_node = named[1]
                 if val_node.type in ("arrow_function", "function"):
-                    fn_name = _snake(key)
-                    fn_code = _extract_inline_fn(fn_name, val_node)
-                    extra_fns.append(fn_code)
-                    pairs.append(f'"{key}": {fn_name}')
+                    # Short arrow functions → closures inline
+                    # Long block-body functions → extract as pub fn
+                    has_block = any(c2.type == "statement_block" for c2 in val_node.children)
+                    block_lines = 0
+                    if has_block:
+                        for c2 in val_node.children:
+                            if c2.type == "statement_block":
+                                block_lines = c2.text.decode().count("\n")
+                    if has_block and block_lines > 3:
+                        # Long function — extract
+                        fn_name = _snake(key)
+                        fn_code = _extract_inline_fn(fn_name, val_node)
+                        extra_fns.append(fn_code)
+                        pairs.append(f'"{key}": {fn_name}')
+                    else:
+                        # Short function — inline as closure
+                        closure = _fmt_expr(convert_expr(val_node))
+                        pairs.append(f'"{key}": {closure}')
                 else:
                     pairs.append(_fmt_expr(convert_expr(ch)))
             else:
@@ -132,7 +146,10 @@ def _object(node: Node) -> RsExpr:
             name = ch.text.decode()
             pairs.append(f'"{name}": {_snake(name)}')
         elif ch.type == "spread_element":
-            pairs.append(_fmt_expr(convert_expr(ch)))
+            named = [c2 for c2 in ch.children if c2.is_named]
+            if named:
+                inner = _fmt_expr(convert_expr(named[0]))
+                pairs.append(f"..{inner}")
         elif ch.type == "method_definition":
             name_node = None
             body_node = None

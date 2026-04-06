@@ -166,7 +166,7 @@ class TestExpressionsCoverage:
 
     def test_object_with_spread_element(self) -> None:
         result = convert_file("const x = { ...other };", "t.ts")
-        assert "/* ..." in result
+        assert "..other" in result
 
     def test_object_shorthand(self) -> None:
         result = convert_file("const obj = { name };", "t.ts")
@@ -178,7 +178,7 @@ class TestExpressionsCoverage:
 
     def test_extract_inline_fn_expression_body(self) -> None:
         result = convert_file("const obj = { calc: (x: number) => x * 2 };", "t.ts")
-        assert "pub fn calc" in result
+        assert "|x| x * 2" in result
 
     def test_object_method_async(self) -> None:
         result = convert_file("const obj = { async load() { return 1; } };", "t.ts")

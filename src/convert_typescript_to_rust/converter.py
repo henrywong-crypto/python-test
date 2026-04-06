@@ -299,7 +299,8 @@ def convert_node(node: Node | None) -> RsNode:
     if t == "spread_element":
         named = [ch for ch in node.children if ch.is_named]
         if named:
-            return RsRawExpr(f"/* ...{_fmt_expr(convert_expr(named[0]))} */")
+            inner = _fmt_expr(convert_expr(named[0]))
+            return RsRawExpr(f"..{inner}")
         return RsRawExpr("/* spread */")
 
     # --- Type casts (drop) ---

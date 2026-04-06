@@ -525,7 +525,7 @@ class TestObjectExtraction:
             'const config = { handler: (x: number) => x + 1 };',
             "t.ts",
         )
-        assert "pub fn handler" in result
+        assert "|x| x + 1" in result
 
 
 class TestSwitchWithComments:

@@ -128,7 +128,7 @@ const merged = { ...defaults, ...overrides };
         result = convert_file(ts, "destr.ts")
         assert "_destructured" in result
         assert "_arr" in result
-        assert "/* ..." in result
+        assert ".." in result
 
 
 class TestConvertDirectory:

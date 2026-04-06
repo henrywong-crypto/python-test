@@ -146,7 +146,7 @@ class TestMiscExpressions:
 
     def test_spread(self) -> None:
         result = convert_file("const arr = [...other];", "t.ts")
-        assert "/* ..." in result
+        assert "..other" in result
 
     def test_new_map(self) -> None:
         result = convert_file("const m = new Map<string, number>();", "t.ts")

@@ -22,7 +22,7 @@ class TestExtractInlineFnWithReturn:
             "const obj = { calc: (x: number): number => x * 2 };",
             "t.ts",
         )
-        assert "pub fn calc" in result
+        assert "|x| x * 2" in result
 
 
 class TestInferConstBoolArray:

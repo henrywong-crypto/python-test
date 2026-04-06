@@ -91,7 +91,7 @@ class TestConverterRemainingLines:
     def test_spread_no_named(self) -> None:
         # Spread with content
         result = convert_file("const x = [...items];", "t.ts")
-        assert "/* ..." in result
+        assert "..items" in result
 
     def test_expression_statement_no_named(self) -> None:
         # expression_statement with trailing comment but no named

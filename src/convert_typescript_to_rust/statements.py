@@ -143,9 +143,9 @@ def _var_declarator(node: Node, kind: str = "let") -> RsStmt | list[RsStmt] | No
                         fields.append(_snake(local.text.decode()))
             stmts: list[RsStmt] = [RsLet("_destructured", mutable=False, value=RsRawExpr(val_s))]
             for f in fields:
-                stmts.append(RsRawStmt(
-                    f'let {f} = _destructured.get("{f}").cloned().unwrap_or_default();'
-                ))
+                stmts.append(RsLet(f, mutable=False, value=RsRawExpr(
+                    f'_destructured.get("{f}").cloned().unwrap_or_default()'
+                )))
             return stmts
         elif pattern.type == "array_pattern":
             fields_arr: list[str] = []
@@ -154,9 +154,9 @@ def _var_declarator(node: Node, kind: str = "let") -> RsStmt | list[RsStmt] | No
                     fields_arr.append(_snake(ch.text.decode()))
             stmts_arr: list[RsStmt] = [RsLet("_arr", mutable=False, value=RsRawExpr(val_s))]
             for i, f in enumerate(fields_arr):
-                stmts_arr.append(RsRawStmt(
-                    f"let {f} = _arr.get({i}).cloned().unwrap_or_default();"
-                ))
+                stmts_arr.append(RsLet(f, mutable=False, value=RsRawExpr(
+                    f"_arr.get({i}).cloned().unwrap_or_default()"
+                )))
             return stmts_arr
 
     name = _snake(name_node.text.decode()) if name_node else "_"
