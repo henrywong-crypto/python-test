@@ -1,53 +1,57 @@
 """Statement handlers: variable declarations, if, for, while, switch, try/catch.
 
-Each public function converts a tree-sitter statement node into its Rust
-equivalent.
+Each public function converts a tree-sitter statement node into a Rust AST
+node.  The ``_block_body_stmts`` helper returns a list of ``RsStmt`` nodes.
 """
 
 from __future__ import annotations
 
 from tree_sitter import Node
 
-from .types import convert_type
+from .rust_ast import (
+    RsStmt, RsRawStmt, RsLet, RsReturn, RsExprStmt, RsIf, RsFor,
+    RsWhile, RsLoop, RsMatch, RsMatchArm, RsTryCatch, RsBreak,
+    RsContinue, RsComment, RsExpr, RsRawExpr,
+)
+from .types import convert_type, convert_type_node
 from .helpers import _snake, _strip_parens, _trailing_comments
 
 
-def _block_body(node: Node | None, ind: int) -> str:
-    """Convert all children of a ``statement_block`` to Rust lines.
-
-    Skips ``{`` and ``}`` tokens and concatenates the converted child nodes.
-
-    Args:
-        node: The tree-sitter ``statement_block`` node, or ``None``.
-        ind: Current indentation level for children.
-
-    Returns:
-        The Rust block body as a multi-line string.
-    """
+def _block_body_stmts(node: Node | None) -> list[RsStmt]:
+    """Convert children of a ``statement_block`` to a list of RsStmt nodes."""
     if node is None:
-        return ""
-    from .converter import c
+        return []
+    from .converter import c, _fmt
 
-    lines: list[str] = []
+    stmts: list[RsStmt] = []
     for ch in node.children:
         if ch.type in ("{", "}"):
             continue
-        line = c(ch, ind)
-        if line is not None and line != "":
-            lines.append(line)
+        result = c(ch)
+        if result is None:
+            continue
+        text = _fmt(result)
+        if text is not None and text != "":
+            stmts.append(RsRawStmt(text=text))
+    return stmts
+
+
+def _block_body(node: Node | None, ind: int) -> str:
+    """Convert all children of a ``statement_block`` to Rust lines (string).
+
+    Backward-compatible wrapper that returns a formatted string.
+    """
+    stmts = _block_body_stmts(node)
+    lines = []
+    for s in stmts:
+        text = s.text if isinstance(s, RsRawStmt) else ""
+        if text:
+            lines.append(text)
     return "\n".join(lines)
 
 
 def _var_decl(node: Node, ind: int) -> str:
-    """Convert a ``lexical_declaration`` or ``variable_declaration`` to Rust ``let`` bindings.
-
-    Args:
-        node: The tree-sitter declaration node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust variable declaration(s).
-    """
+    """Convert a ``lexical_declaration`` or ``variable_declaration`` to Rust ``let`` bindings."""
     kind = "let"
     for ch in node.children:
         if ch.type == "const":
@@ -67,19 +71,8 @@ def _var_decl(node: Node, ind: int) -> str:
 
 
 def _var_declarator_line(node: Node, ind: int, kind: str = "let") -> str:
-    """Convert a single ``variable_declarator`` to a Rust ``let`` binding.
-
-    Handles plain variables, object destructuring, and array destructuring.
-
-    Args:
-        node: The tree-sitter ``variable_declarator`` node.
-        ind: Current indentation level.
-        kind: ``"let"`` or ``"let mut"``.
-
-    Returns:
-        The Rust let-binding line(s).
-    """
-    from .converter import c
+    """Convert a single ``variable_declarator`` to a Rust ``let`` binding."""
+    from .converter import c, _fmt
 
     P = "    " * ind
     name_node = None
@@ -106,7 +99,7 @@ def _var_declarator_line(node: Node, ind: int, kind: str = "let") -> str:
             break
 
     if pattern is not None:
-        val_s = c(value, ind) if value else "Default::default()"
+        val_s = _fmt(c(value)) if value else "Default::default()"
         if pattern.type == "object_pattern":
             fields: list[str] = []
             for ch in pattern.children:
@@ -138,43 +131,27 @@ def _var_declarator_line(node: Node, ind: int, kind: str = "let") -> str:
     name = _snake(name_node.text.decode()) if name_node else "_"
     ts = f": {convert_type(type_ann)}" if type_ann else ""
     if value:
-        return f"{P}{kind} {name}{ts} = {c(value, ind)};"
+        return f"{P}{kind} {name}{ts} = {_fmt(c(value))};"
     return f"{P}{kind} {name}{ts} = Default::default();"
 
 
 def _if_stmt(node: Node, ind: int) -> str:
-    """Convert an ``if_statement`` to Rust ``if ... { } else { }``.
-
-    Args:
-        node: The tree-sitter ``if_statement`` node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust if statement string.
-    """
-    from .converter import c
+    """Convert an ``if_statement`` to Rust ``if ... { } else { }``."""
+    from .converter import c, _fmt
 
     P = "    " * ind
     cond = node.child_by_field_name("condition")
     cons = node.child_by_field_name("consequence")
     alt = node.child_by_field_name("alternative")
-    cond_s = _strip_parens(c(cond, ind)) if cond else "true"
+    cond_s = _strip_parens(_fmt(c(cond))) if cond else "true"
     result = f"{P}if {cond_s} {{\n{_block_body(cons, ind + 1)}\n{P}}}"
     if alt:
-        result += c(alt, ind)
+        result += _fmt(c(alt))
     return result
 
 
 def _for_c(node: Node, ind: int) -> str:
-    """Convert a C-style ``for`` statement to a Rust ``loop``.
-
-    Args:
-        node: The tree-sitter ``for_statement`` node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust loop string.
-    """
+    """Convert a C-style ``for`` statement to a Rust ``loop``."""
     P = "    " * ind
     body = None
     for ch in node.children:
@@ -184,16 +161,8 @@ def _for_c(node: Node, ind: int) -> str:
 
 
 def _for_in(node: Node, ind: int) -> str:
-    """Convert a ``for-in`` or ``for-of`` statement to Rust ``for ... in ... {}``.
-
-    Args:
-        node: The tree-sitter ``for_in_statement`` node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust for-in loop string.
-    """
-    from .converter import c
+    """Convert a ``for-in`` or ``for-of`` statement to Rust ``for ... in ... {}``."""
+    from .converter import c, _fmt
 
     P = "    " * ind
     left = node.child_by_field_name("left")
@@ -210,21 +179,13 @@ def _for_in(node: Node, ind: int) -> str:
                     if c2.type == "identifier":
                         var_name = _snake(c2.text.decode())
                         break
-    iter_s = c(right, ind) if right else "iter"
+    iter_s = _fmt(c(right)) if right else "iter"
     return f"{P}for {var_name} in {iter_s}.iter() {{\n{_block_body(body, ind + 1)}\n{P}}}"
 
 
 def _switch(node: Node, ind: int) -> str:
-    """Convert a ``switch`` statement to Rust ``match``.
-
-    Args:
-        node: The tree-sitter ``switch_statement`` node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust match expression string.
-    """
-    from .converter import c
+    """Convert a ``switch`` statement to Rust ``match``."""
+    from .converter import c, _fmt
 
     P = "    " * ind
     val = None
@@ -234,7 +195,7 @@ def _switch(node: Node, ind: int) -> str:
             val = ch
         if ch.type == "switch_body":
             body = ch
-    val_s = _strip_parens(c(val, ind)) if val else "value"
+    val_s = _strip_parens(_fmt(c(val))) if val else "value"
     arms: list[str] = []
     if body:
         for ch in body.children:
@@ -250,30 +211,20 @@ def _switch(node: Node, ind: int) -> str:
                         case_val = c2
                     elif c2.is_named:
                         stmts.append(c2)
-                cv = c(case_val, ind) if case_val else "_"
-                bl = [c(s, ind + 2) for s in stmts if "break;" not in c(s, ind + 2)]
+                cv = _fmt(c(case_val)) if case_val else "_"
+                bl = [_fmt(c(s)) for s in stmts if "break;" not in _fmt(c(s))]
                 bl_s = "\n".join(bl) if bl else f"{'    ' * (ind + 2)}()"
                 arms.append(f"{'    ' * (ind + 1)}{cv} => {{\n{bl_s}\n{'    ' * (ind + 1)}}}")
             elif ch.type == "switch_default":
                 stmts_d = [c2 for c2 in ch.children if c2.is_named]
-                bl = [c(s, ind + 2) for s in stmts_d if "break;" not in c(s, ind + 2)]
+                bl = [_fmt(c(s)) for s in stmts_d if "break;" not in _fmt(c(s))]
                 bl_s = "\n".join(bl) if bl else f"{'    ' * (ind + 2)}()"
                 arms.append(f"{'    ' * (ind + 1)}_ => {{\n{bl_s}\n{'    ' * (ind + 1)}}}")
     return f"{P}match {val_s} {{\n" + "\n".join(arms) + f"\n{P}}}"
 
 
 def _try(node: Node, ind: int) -> str:
-    """Convert a ``try/catch/finally`` statement to Rust.
-
-    Uses a closure returning ``Result`` to simulate try/catch.
-
-    Args:
-        node: The tree-sitter ``try_statement`` node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust try/catch equivalent.
-    """
+    """Convert a ``try/catch/finally`` statement to Rust."""
     P = "    " * ind
     try_block = None
     catch_clause = None

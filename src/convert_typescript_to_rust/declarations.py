@@ -1,7 +1,7 @@
 """Declaration handlers: functions, classes, interfaces, enums, exports, type aliases.
 
-Each public function takes a tree-sitter ``Node`` (and optionally an
-indentation level) and returns the equivalent Rust source fragment.
+Each public function takes a tree-sitter ``Node`` and returns a Rust AST
+node (``RsItem``) or a formatted string for backward compatibility.
 """
 
 from __future__ import annotations
@@ -9,25 +9,27 @@ from __future__ import annotations
 import re
 from tree_sitter import Node
 
-from .types import convert_type, _TYPE_MAP
+from .rust_ast import (
+    RsItem, RsFunction, RsStruct, RsEnum, RsImpl, RsTypeAlias, RsConst,
+    RsField, RsEnumVariant, RsParam, RsComment, RsRawStmt,
+    RsStmt, RsRawExpr, RsExpr, RsType, RsRawType,
+)
+from .types import convert_type, convert_type_node, _TYPE_MAP
 from .helpers import _snake, _screaming, _safe_field
 
 
-def _params(node: Node | None) -> str:
-    """Convert a ``formal_parameters`` node to a Rust parameter list string.
-
-    Args:
-        node: The tree-sitter ``formal_parameters`` node, or ``None``.
-
-    Returns:
-        A comma-separated Rust parameter string.
-    """
+def _params_list(node: Node | None) -> list[RsParam]:
+    """Convert a ``formal_parameters`` node to a list of RsParam AST nodes."""
     if node is None:
-        return ""
-    params: list[str] = []
+        return []
+    params: list[RsParam] = []
     for ch in node.children:
         if ch.type == "comment":
-            params.append(f"/* {ch.text.decode().lstrip('/ ')} */")
+            # Comments in params are tricky -- we store as a param with comment name
+            params.append(RsParam(
+                name=f"/* {ch.text.decode().lstrip('/ ')} */",
+                type_ann=RsRawType(text=""),
+            ))
         elif ch.type == "required_parameter":
             name = None
             type_ann = None
@@ -45,11 +47,11 @@ def _params(node: Node | None) -> str:
             n = _snake(name.text.decode()) if name else "_"
             t = convert_type(type_ann) if type_ann else "serde_json::Value"
             if is_rest:
-                params.append(f"{n}: &[{t}]")
+                params.append(RsParam(name=n, type_ann=RsRawType(text=t), is_rest=True))
             else:
                 if t == "String":
                     t = "&str"
-                params.append(f"{n}: {t}")
+                params.append(RsParam(name=n, type_ann=RsRawType(text=t)))
         elif ch.type == "optional_parameter":
             name = None
             type_ann = None
@@ -66,26 +68,46 @@ def _params(node: Node | None) -> str:
             if has_default:
                 if t == "String":
                     t = "&str"
-                params.append(f"{n}: {t}")
+                params.append(RsParam(name=n, type_ann=RsRawType(text=t)))
             else:
-                params.append(f"{n}: Option<{t}>")
-    return ", ".join(params)
+                params.append(RsParam(name=n, type_ann=RsRawType(text=f"Option<{t}>")))
+    return params
+
+
+def _params(node: Node | None) -> str:
+    """Convert a ``formal_parameters`` node to a Rust parameter list string.
+
+    Backward-compatible wrapper returning a string.
+    """
+    param_list = _params_list(node)
+    parts: list[str] = []
+    for p in param_list:
+        from .formatter import format_type
+        ts = format_type(p.type_ann)
+        if ts == "":
+            # Comment-only param
+            parts.append(p.name)
+        elif p.is_rest:
+            parts.append(f"{p.name}: &[{ts}]")
+        else:
+            parts.append(f"{p.name}: {ts}")
+    return ", ".join(parts)
 
 
 def _function(node: Node, ind: int = 0) -> str:
     """Convert a function or generator declaration to a Rust ``pub fn``.
 
-    Args:
-        node: The tree-sitter function declaration node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust function definition string.
+    Returns the formatted string (for backward compatibility with converter.py).
     """
-    # Late import to avoid circular dependency
-    from .statements import _block_body
+    fn_node = _function_node(node)
+    from .formatter import format_item
+    return format_item(fn_node, ind)
 
-    P = "    " * ind
+
+def _function_node(node: Node) -> RsFunction:
+    """Convert a function or generator declaration to an RsFunction AST node."""
+    from .statements import _block_body_stmts
+
     name = node.child_by_field_name("name")
     params_node = None
     ret = None
@@ -101,29 +123,26 @@ def _function(node: Node, ind: int = 0) -> str:
         if ch.type == "statement_block":
             body = ch
     fn_name = _snake(name.text.decode()) if name else "unknown"
-    params_s = _params(params_node)
-    ret_s = ""
+    params = _params_list(params_node)
+    ret_type = None
     if ret:
         rt = convert_type(ret)
         if rt not in ("()", ""):
-            ret_s = f" -> {rt}"
-    async_kw = "async " if is_async else ""
-    body_s = _block_body(body, ind + 1) if body else f"{P}    // empty"
-    return f"{P}pub {async_kw}fn {fn_name}({params_s}){ret_s} {{\n{body_s}\n{P}}}"
+            ret_type = RsRawType(text=rt)
+    body_stmts = _block_body_stmts(body) if body else [RsRawStmt(text="    // empty")]
+
+    return RsFunction(
+        name=fn_name,
+        is_pub=True,
+        is_async=is_async,
+        params=params,
+        return_type=ret_type,
+        body=body_stmts,
+    )
 
 
 def _type_alias(node: Node) -> str:
-    """Convert a ``type_alias_declaration`` to a Rust type alias or struct.
-
-    If the aliased type is an object type, a struct is generated instead of
-    a simple ``type`` alias.
-
-    Args:
-        node: The tree-sitter ``type_alias_declaration`` node.
-
-    Returns:
-        The Rust type alias or struct definition.
-    """
+    """Convert a ``type_alias_declaration`` to a Rust type alias or struct."""
     name = None
     type_val = None
     found_eq = False
@@ -152,15 +171,7 @@ def _type_alias(node: Node) -> str:
 
 
 def _object_type_to_struct(name: str, node: Node) -> str:
-    """Convert a TypeScript object type to a Rust struct with serde derives.
-
-    Args:
-        name: The struct name.
-        node: The tree-sitter ``object_type`` node.
-
-    Returns:
-        The Rust struct definition string.
-    """
+    """Convert a TypeScript object type to a Rust struct with serde derives."""
     fields: list[str] = []
     for ch in node.children:
         if ch.type == "comment":
@@ -191,14 +202,7 @@ def _object_type_to_struct(name: str, node: Node) -> str:
 
 
 def _interface(node: Node) -> str:
-    """Convert an ``interface_declaration`` to a Rust struct.
-
-    Args:
-        node: The tree-sitter ``interface_declaration`` node.
-
-    Returns:
-        The Rust struct definition string.
-    """
+    """Convert an ``interface_declaration`` to a Rust struct."""
     name = None
     body = None
     for ch in node.children:
@@ -238,14 +242,7 @@ def _interface(node: Node) -> str:
 
 
 def _class(node: Node) -> str:
-    """Convert a class (or abstract class) declaration to a Rust struct + impl.
-
-    Args:
-        node: The tree-sitter class declaration node.
-
-    Returns:
-        The Rust struct and impl block.
-    """
+    """Convert a class (or abstract class) declaration to a Rust struct + impl."""
     name = None
     body = None
     for ch in node.children:
@@ -285,14 +282,7 @@ def _class(node: Node) -> str:
 
 
 def _method(node: Node) -> str:
-    """Convert a ``method_definition`` to a Rust method inside an impl block.
-
-    Args:
-        node: The tree-sitter ``method_definition`` node.
-
-    Returns:
-        The Rust method definition string (indented for impl block).
-    """
+    """Convert a ``method_definition`` to a Rust method inside an impl block."""
     from .statements import _block_body
 
     name = None
@@ -336,14 +326,7 @@ def _method(node: Node) -> str:
 
 
 def _enum(node: Node) -> str:
-    """Convert an ``enum_declaration`` to a Rust enum.
-
-    Args:
-        node: The tree-sitter ``enum_declaration`` node.
-
-    Returns:
-        The Rust enum definition string.
-    """
+    """Convert an ``enum_declaration`` to a Rust enum."""
     name = None
     body = None
     for ch in node.children:
@@ -369,19 +352,8 @@ def _enum(node: Node) -> str:
 
 
 def _export(node: Node, ind: int) -> str:
-    """Convert an ``export_statement`` to Rust.
-
-    Delegates to the appropriate handler based on the exported declaration
-    type. Handles ``export default`` for objects, identifiers, and calls.
-
-    Args:
-        node: The tree-sitter ``export_statement`` node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust code for the export.
-    """
-    from .converter import c
+    """Convert an ``export_statement`` to Rust."""
+    from .converter import c, _fmt
 
     parts: list[str] = []
     has_default = any(
@@ -395,31 +367,24 @@ def _export(node: Node, ind: int) -> str:
             "interface_declaration", "class_declaration",
             "abstract_class_declaration", "enum_declaration",
         ):
-            parts.append(c(ch, ind))
+            parts.append(_fmt(c(ch, ind)))
         elif ch.type == "lexical_declaration":
             parts.append(_export_const(ch, ind))
         elif ch.type == "object" and has_default:
-            parts.append(f"pub const DEFAULT: serde_json::Value = {c(ch, ind)};")
+            parts.append(f"pub const DEFAULT: serde_json::Value = {_fmt(c(ch))};")
         elif ch.type == "satisfies_expression" and has_default:
             named = [c2 for c2 in ch.children if c2.is_named]
             if named:
-                parts.append(f"pub const DEFAULT: serde_json::Value = {c(named[0], ind)};")
+                parts.append(f"pub const DEFAULT: serde_json::Value = {_fmt(c(named[0]))};")
         elif ch.type == "identifier" and has_default:
             parts.append(f"pub use {_snake(ch.text.decode())} as default;")
         elif ch.type == "call_expression" and has_default:
-            parts.append(f"pub const DEFAULT: serde_json::Value = {c(ch, ind)};")
+            parts.append(f"pub const DEFAULT: serde_json::Value = {_fmt(c(ch))};")
     return "\n".join(parts)
 
 
 def _infer_const_type(value_node: Node | None) -> str:
-    """Infer a Rust type from a constant's value node.
-
-    Args:
-        value_node: The tree-sitter node for the constant's value.
-
-    Returns:
-        The inferred Rust type string.
-    """
+    """Infer a Rust type from a constant's value node."""
     if value_node is None:
         return "&str"
     t = value_node.type
@@ -453,19 +418,8 @@ def _infer_const_type(value_node: Node | None) -> str:
 
 
 def _export_const(node: Node, ind: int) -> str:
-    """Convert an exported ``const`` declaration.
-
-    If the value is an arrow function or function expression, emits a
-    ``pub fn`` instead of a ``pub const``.
-
-    Args:
-        node: The tree-sitter ``lexical_declaration`` node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust constant or function definition.
-    """
-    from .converter import c
+    """Convert an exported ``const`` declaration."""
+    from .converter import c, _fmt
 
     P = "    " * ind
     for ch in node.children:
@@ -490,7 +444,7 @@ def _export_const(node: Node, ind: int) -> str:
             name = name_node.text.decode() if name_node else "UNKNOWN"
             if value and value.type in ("arrow_function", "function"):
                 return _const_fn(name, value, ind)
-            val_s = c(value, ind) if value else '""'
+            val_s = _fmt(c(value)) if value else '""'
             const_name = _screaming(name)
             rs_type = convert_type(type_ann) if type_ann else _infer_const_type(value)
             return f"{P}pub const {const_name}: {rs_type} = {val_s};"
@@ -498,18 +452,9 @@ def _export_const(node: Node, ind: int) -> str:
 
 
 def _const_fn(name: str, node: Node, ind: int) -> str:
-    """Convert a ``const name = (params) => { ... }`` to ``pub fn name(...)``.
-
-    Args:
-        name: The original TypeScript identifier name.
-        node: The tree-sitter arrow-function or function node.
-        ind: Current indentation level.
-
-    Returns:
-        The Rust function definition string.
-    """
-    from .converter import c
-    from .statements import _block_body
+    """Convert a ``const name = (params) => { ... }`` to ``pub fn name(...)``."""
+    from .converter import c, _fmt
+    from .statements import _block_body, _block_body_stmts
 
     P = "    " * ind
     fn_name = _snake(name)
@@ -542,5 +487,5 @@ def _const_fn(name: str, node: Node, ind: int) -> str:
             elif found_arrow and ch.is_named:
                 expr = ch
                 break
-        body_s = f"{P}    {c(expr, ind + 1)}" if expr else f"{P}    // empty"
+        body_s = f"{P}    {_fmt(c(expr))}" if expr else f"{P}    // empty"
     return f"{P}pub {async_kw}fn {fn_name}({ps}){ret_s} {{\n{body_s}\n{P}}}"

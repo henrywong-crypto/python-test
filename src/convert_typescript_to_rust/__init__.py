@@ -1,15 +1,21 @@
 """convert_typescript_to_rust -- TypeScript to Rust AST transpiler.
 
 Public API for converting TypeScript source code to Rust using tree-sitter
-for parsing and an AST-walking approach for code generation.
+for parsing, an AST-walking approach that builds a Rust AST intermediate
+representation, and a formatter that renders the AST to source code.
+
+Architecture:
+    TS source -> tree-sitter parse -> converter (builds Rust AST nodes)
+              -> formatter (renders to string) -> postprocess -> output
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from .converter import c as _c
+from .converter import c as _c, _fmt
 from .postprocess import postprocess as _postprocess
+from .rust_ast import RsFile, RsComment, RsRawStmt
 
 __version__: str = "0.1.0"
 
@@ -23,6 +29,13 @@ TSX_LANGUAGE: Language = Language(_ts_lang.language_tsx())
 
 def convert_file(content: str, file_path: str = "<string>") -> str:
     """Convert a TypeScript source string to Rust source code.
+
+    The conversion pipeline:
+    1. Parse TypeScript with tree-sitter
+    2. Walk the AST and build Rust AST nodes via converter modules
+    3. Assemble an ``RsFile`` intermediate representation
+    4. Format the ``RsFile`` to a string via the formatter
+    5. Apply post-processing regex fixups
 
     Args:
         content: The TypeScript source text.

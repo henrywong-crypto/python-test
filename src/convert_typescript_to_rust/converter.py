@@ -4,6 +4,9 @@ The ``c(node, ind)`` function is the main dispatch point. It examines each
 tree-sitter node's type and delegates to the appropriate handler in the
 ``types``, ``calls``, ``declarations``, ``statements``, and ``expressions``
 modules.
+
+All handlers now return Rust AST nodes (from ``rust_ast``). The ``_fmt``
+helper converts any node to a formatted string for backward compatibility.
 """
 
 from __future__ import annotations
@@ -11,6 +14,9 @@ from __future__ import annotations
 import re
 from tree_sitter import Node
 
+from .rust_ast import (
+    RsExpr, RsRawExpr, RsStmt, RsRawStmt, RsItem, RsComment,
+)
 from .types import convert_type, _TYPE_MAP
 from .helpers import (
     _snake,
@@ -38,6 +44,32 @@ from .statements import (
     _block_body,
 )
 from .expressions import _template, _arrow, _object, _args
+
+
+def _fmt(node_or_str, ind: int = 0) -> str:
+    """Convert any AST node or string to a formatted string.
+
+    This is the bridge between the AST-based and string-based worlds.
+    """
+    if node_or_str is None:
+        return ""
+    if isinstance(node_or_str, str):
+        return node_or_str
+    if isinstance(node_or_str, RsRawExpr):
+        return node_or_str.text
+    if isinstance(node_or_str, RsRawStmt):
+        return node_or_str.text
+    if isinstance(node_or_str, RsComment):
+        return node_or_str.text
+    # For any other AST node, use the formatter
+    from .formatter import format_expr, format_stmt, format_item
+    if isinstance(node_or_str, RsExpr):
+        return format_expr(node_or_str)
+    if isinstance(node_or_str, RsStmt):
+        return format_stmt(node_or_str, ind)
+    if isinstance(node_or_str, RsItem):
+        return format_item(node_or_str, ind)
+    return str(node_or_str)
 
 
 def c(node: Node | None, ind: int = 0) -> str:
@@ -98,7 +130,7 @@ def c(node: Node | None, ind: int = 0) -> str:
 
     # --- Template strings ---
     if t == "template_string":
-        return _template(node, ind)
+        return _fmt(_template(node))
     if t == "template_substitution":
         for ch in node.children:
             if ch.is_named:
@@ -197,10 +229,10 @@ def c(node: Node | None, ind: int = 0) -> str:
 
     # --- Call ---
     if t == "call_expression":
-        return _call(node, ind)
+        return _fmt(_call(node))
 
     if t == "arguments":
-        return _args(node, ind)
+        return _args(node)
 
     # --- New ---
     if t == "new_expression":
@@ -210,7 +242,7 @@ def c(node: Node | None, ind: int = 0) -> str:
         for ch in node.children:
             if ch.type == "arguments":
                 args_node = ch
-        args_s = _args(args_node, ind)
+        args_s = _args(args_node)
         if cls_s in ("std::collections::HashMap", "HashMap"):
             return "std::collections::HashMap::new()"
         if cls_s in ("std::collections::HashSet", "HashSet"):
@@ -232,11 +264,11 @@ def c(node: Node | None, ind: int = 0) -> str:
 
     # --- Arrow ---
     if t == "arrow_function":
-        return _arrow(node, ind)
+        return _fmt(_arrow(node))
 
     # --- Object ---
     if t == "object":
-        return _object(node, ind)
+        return _fmt(_object(node))
 
     # --- Array ---
     if t == "array":
