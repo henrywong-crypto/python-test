@@ -1,0 +1,41 @@
+[project]
+name = "convert-typescript-to-rust"
+version = "0.1.0"
+description = "Production-grade TypeScript to Rust AST transpiler"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.9"
+dependencies = [
+    "tree-sitter>=0.23",
+    "tree-sitter-typescript>=0.23",
+]
+
+[project.scripts]
+convert-typescript-to-rust = "convert_typescript_to_rust.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/convert_typescript_to_rust"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+[tool.coverage.run]
+source = ["convert_typescript_to_rust"]
+omit = [
+    "src/convert_typescript_to_rust/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 95
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
