@@ -101,43 +101,22 @@ def _arrow(node: Node) -> RsExpr:
 
 
 def _object(node: Node) -> RsExpr:
-    """Convert an object literal to Rust ``serde_json::json!({...})``.
-
-    Inline function values are extracted as separate ``pub fn`` definitions.
-    """
+    """Convert an object literal to Rust ``serde_json::json!({...})``."""
     from .converter import convert_expr, convert_node, _fmt_expr, _fmt_node
     from .statements import _block_body_stmts
 
     pairs: list[str] = []
-    extra_fns: list[str] = []
-    comments: list[str] = []
     for ch in node.children:
         if ch.type == "comment":
-            comments.append(ch.text.decode())
+            pairs.append(ch.text.decode())
         elif ch.type == "pair":
             named = [c2 for c2 in ch.children if c2.is_named]
             if len(named) >= 2:
                 key = named[0].text.decode().strip("'\"")
                 val_node = named[1]
                 if val_node.type in ("arrow_function", "function"):
-                    # Short arrow functions → closures inline
-                    # Long block-body functions → extract as pub fn
-                    has_block = any(c2.type == "statement_block" for c2 in val_node.children)
-                    block_lines = 0
-                    if has_block:
-                        for c2 in val_node.children:
-                            if c2.type == "statement_block":
-                                block_lines = c2.text.decode().count("\n")
-                    if has_block and block_lines > 3:
-                        # Long function — extract
-                        fn_name = _snake(key)
-                        fn_code = _extract_inline_fn(fn_name, val_node)
-                        extra_fns.append(fn_code)
-                        pairs.append(f'"{key}": {fn_name}')
-                    else:
-                        # Short function — inline as closure
-                        closure = _fmt_expr(convert_expr(val_node))
-                        pairs.append(f'"{key}": {closure}')
+                    closure = _fmt_expr(convert_expr(val_node))
+                    pairs.append(f'"{key}": {closure}')
                 else:
                     pairs.append(_fmt_expr(convert_expr(ch)))
             else:
@@ -170,18 +149,30 @@ def _object(node: Node) -> RsExpr:
                 async_kw = "async " if is_async else ""
                 stmts = _block_body_stmts(body_node) if body_node else []
                 body_s = "\n".join(_fmt_node(s) for s in stmts if _fmt_node(s))
-                extra_fns.append(
-                    f"pub {async_kw}fn {fn_name}({ps}) {{\n{body_s}\n}}"
-                )
-                pairs.append(f'"{name_node.text.decode()}": {fn_name}')
-    obj_str = "serde_json::json!({" + ", ".join(pairs) + "})"
-    result_parts: list[str] = []
-    if comments:
-        result_parts.extend(comments)
-    if extra_fns:
-        result_parts.extend(extra_fns)
-    result_parts.append(obj_str)
-    return RsRawExpr(text="\n\n".join(result_parts))
+                closure = f"{async_kw}|{ps}| {{\n{body_s}\n}}"
+                pairs.append(f'"{name_node.text.decode()}": {closure}')
+    # Decide single-line vs multi-line based on pair count and total length
+    # Filter out comments for single-line check
+    non_comment_pairs = [p for p in pairs if not p.lstrip().startswith("//") and not p.lstrip().startswith("/*")]
+    joined = ", ".join(non_comment_pairs)
+    if len(non_comment_pairs) <= 3 and len(joined) < 80 and len(non_comment_pairs) == len(pairs):
+        obj_str = "serde_json::json!({" + joined + "})"
+    else:
+        # Build multiline with proper comma handling
+        lines_out: list[str] = []
+        for p in pairs:
+            is_comment = p.lstrip().startswith("//") or p.lstrip().startswith("/*")
+            if is_comment:
+                lines_out.append(p)
+            elif "\n" in p:
+                # Indent all lines of a multiline value
+                sub_lines = p.split("\n")
+                lines_out.append("\n    ".join(sub_lines) + ",")
+            else:
+                lines_out.append(p + ",")
+        inner = "\n    ".join(lines_out)
+        obj_str = "serde_json::json!({\n    " + inner + "\n})"
+    return RsRawExpr(text=obj_str)
 
 
 def _extract_inline_fn(name: str, node: Node) -> str:

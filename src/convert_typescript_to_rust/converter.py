@@ -143,6 +143,11 @@ def convert_node(node: Node | None) -> RsNode:
                 if tc:
                     return RsRawExpr(f"{_fmt_expr(result_expr)} {tc}")
                 return result_expr
+            elif op_text == "??":
+                result_expr = RsRawExpr(f"{_fmt_expr(left)}.unwrap_or({_fmt_expr(right)})")
+                if tc:
+                    return RsRawExpr(f"{_fmt_expr(result_expr)} {tc}")
+                return result_expr
             result_expr = RsBinOp(left, op_text, right)
             if tc:
                 return RsRawExpr(f"{_fmt_expr(result_expr)} {tc}")

@@ -17,9 +17,7 @@ from .rust_ast import RsExpr, RsRawExpr
 _METHOD_MAP: dict[str, str] = {
     "push": "push",
     "pop": "pop",
-    "shift": "remove(0",
     "includes": "contains",
-    "indexOf": "iter().position(|x| x ==",
     "toLowerCase": "to_lowercase()",
     "toUpperCase": "to_uppercase()",
     "startsWith": "starts_with",
@@ -216,12 +214,23 @@ def _call(node: Node) -> RsExpr:
                 return RsRawExpr(text=f'format!("{{:x}}", {obj_s})')
             return RsRawExpr(text=f"{obj_s}.to_string()")
 
+        # indexOf special case
+        if prop == "indexOf":
+            return RsRawExpr(text=f"{obj_s}.find({args_s})")
+
+        # shift special case (no args, always remove first element)
+        if prop == "shift":
+            return RsRawExpr(text=f"{obj_s}.remove(0)")
+
         # Common method renames
         if prop in _METHOD_MAP:
             rs_method = _METHOD_MAP[prop]
-            if rs_method.endswith("()"):
+            if rs_method == "__special__":
+                pass  # handled above
+            elif rs_method.endswith("()"):
                 return RsRawExpr(text=f"{obj_s}.{rs_method}")
-            return RsRawExpr(text=f"{obj_s}.{rs_method}({args_s})")
+            else:
+                return RsRawExpr(text=f"{obj_s}.{rs_method}({args_s})")
 
         # Default member call
         prop_s = _snake(prop)

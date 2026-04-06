@@ -12,6 +12,7 @@ from .rust_ast import (
     RsStmt, RsRawStmt, RsLet, RsReturn, RsExprStmt, RsIf, RsFor,
     RsWhile, RsLoop, RsMatch, RsMatchArm, RsTryCatch, RsBreak,
     RsContinue, RsComment, RsExpr, RsRawExpr,
+    RsFunction, RsStruct, RsEnum, RsImpl, RsTypeAlias, RsConst,
 )
 from .types import convert_type, convert_type_node
 from .helpers import _snake, _strip_parens, _trailing_comments
@@ -23,6 +24,16 @@ def _block_body_stmts(node: Node | None) -> list[RsStmt]:
         return []
     from .converter import convert_node, _fmt_node
 
+    _ITEM_TYPES = (RsFunction, RsStruct, RsEnum, RsImpl, RsTypeAlias, RsConst)
+
+    def _wrap_item(item):
+        """Wrap a top-level RsItem as an RsRawStmt for use inside a block."""
+        from .formatter import format_item
+        text = format_item(item, 0)
+        if text and text.strip():
+            return RsRawStmt(text=text)
+        return None
+
     stmts: list[RsStmt] = []
     for ch in node.children:
         if ch.type in ("{", "}"):
@@ -32,12 +43,20 @@ def _block_body_stmts(node: Node | None) -> list[RsStmt]:
             continue
         if isinstance(result, list):
             for r in result:
-                if isinstance(r, RsStmt):
+                if isinstance(r, _ITEM_TYPES):
+                    wrapped = _wrap_item(r)
+                    if wrapped:
+                        stmts.append(wrapped)
+                elif isinstance(r, RsStmt):
                     stmts.append(r)
                 elif r is not None:
                     text = _fmt_node(r)
                     if text:
                         stmts.append(RsRawStmt(text=text))
+        elif isinstance(result, _ITEM_TYPES):
+            wrapped = _wrap_item(result)
+            if wrapped:
+                stmts.append(wrapped)
         elif isinstance(result, RsStmt):
             stmts.append(result)
         elif isinstance(result, RsExpr):
@@ -218,15 +237,18 @@ def _for_in(node: Node) -> RsFor:
     body_node = node.child_by_field_name("body")
     var_name = "_item"
     if left:
-        for ch in left.children:
-            if ch.type == "identifier":
-                var_name = _snake(ch.text.decode())
-                break
-            if ch.type == "variable_declarator":
-                for c2 in ch.children:
-                    if c2.type == "identifier":
-                        var_name = _snake(c2.text.decode())
-                        break
+        if left.type == "identifier":
+            var_name = _snake(left.text.decode())
+        else:
+            for ch in left.children:
+                if ch.type == "identifier":
+                    var_name = _snake(ch.text.decode())
+                    break
+                if ch.type == "variable_declarator":
+                    for c2 in ch.children:
+                        if c2.type == "identifier":
+                            var_name = _snake(c2.text.decode())
+                            break
     iter_s = _fmt_expr(convert_expr(right)) if right else "iter"
     return RsFor(
         var_name=var_name,

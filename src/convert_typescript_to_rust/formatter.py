@@ -27,6 +27,19 @@ from .rust_ast import (
 _INDENT = "    "
 
 
+def _indent_continuation(text: str, indent: int) -> str:
+    """Re-indent all lines of a multiline expression to match context."""
+    P = _INDENT * indent
+    lines = text.split("\n")
+    result = [lines[0]]
+    for line in lines[1:]:
+        if line.strip():
+            result.append(P + line)
+        else:
+            result.append("")
+    return "\n".join(result)
+
+
 # -----------------------------------------------------------------------
 # Public entry point
 # -----------------------------------------------------------------------
@@ -224,16 +237,24 @@ def format_stmt(stmt: RsStmt, indent: int) -> str:
         ts = f": {format_type(stmt.type_ann)}" if stmt.type_ann else ""
         if stmt.value is not None:
             vs = format_expr(stmt.value)
+            if "\n" in vs:
+                vs = _indent_continuation(vs, indent)
             return f"{P}let {mut}{stmt.name}{ts} = {vs};"
         return f"{P}let {mut}{stmt.name}{ts} = Default::default();"
 
     if isinstance(stmt, RsReturn):
         if stmt.value is not None:
-            return f"{P}return {format_expr(stmt.value)};"
+            vs = format_expr(stmt.value)
+            if "\n" in vs:
+                vs = _indent_continuation(vs, indent)
+            return f"{P}return {vs};"
         return f"{P}return;"
 
     if isinstance(stmt, RsExprStmt):
-        return f"{P}{format_expr(stmt.expr)};"
+        vs = format_expr(stmt.expr)
+        if "\n" in vs:
+            vs = _indent_continuation(vs, indent)
+        return f"{P}{vs};"
 
     if isinstance(stmt, RsIf):
         return _format_if(stmt, indent)
@@ -268,7 +289,16 @@ def format_stmt(stmt: RsStmt, indent: int) -> str:
         return f"{P}{stmt.text}"
 
     if isinstance(stmt, RsRawStmt):
-        # Raw statements already have their own indentation from the converter
+        # Re-indent multiline raw statements to match context
+        if "\n" in stmt.text and indent > 0:
+            lines = stmt.text.split("\n")
+            result_lines = []
+            for line in lines:
+                if line.strip():
+                    result_lines.append(P + line)
+                else:
+                    result_lines.append("")
+            return "\n".join(result_lines)
         return stmt.text
 
     return ""

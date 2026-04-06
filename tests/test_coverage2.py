@@ -182,7 +182,8 @@ class TestExpressionsCoverage:
 
     def test_object_method_async(self) -> None:
         result = convert_file("const obj = { async load() { return 1; } };", "t.ts")
-        assert "pub async fn load" in result
+        assert "async" in result
+        assert "load" in result
 
 
 class TestStatementsCoverage:

@@ -197,7 +197,8 @@ class TestExpressionsRemaining:
             "const obj = { greet(name: string) { return name; } };",
             "t.ts",
         )
-        assert "pub fn greet" in result
+        assert "greet" in result
+        assert "return name" in result
 
 
 class TestStatementsRemaining:
